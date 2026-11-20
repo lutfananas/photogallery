@@ -10,12 +10,18 @@ import androidx.compose.material.icons.outlined.Thermostat
 import androidx.compose.material.icons.outlined.Vignette
 import androidx.compose.material.icons.outlined.WbSunny
 import androidx.compose.material.icons.outlined.Gradient
+import androidx.compose.material.icons.outlined.Details
+import androidx.compose.material.icons.outlined.Grain
+import androidx.compose.material.icons.outlined.Highlight
+import androidx.compose.material.icons.outlined.Tonality
 import androidx.compose.ui.graphics.vector.ImageVector
 
 enum class EditTab(val title: String, val label: String) {
     Crop("Crop and rotate", "Crop"),
     Adjust("Adjust", "Adjust"),
     Filters("Filters", "Filters"),
+    Curves("Tone curves", "Curves"),
+    Markup("Markup", "Markup"),
 }
 
 /** [ratio] is width / height; null = free, -1 = the image's own ratio. */
@@ -36,7 +42,11 @@ enum class AdjustTool(val label: String, val icon: ImageVector, val min: Float =
     Saturation("Saturation", Icons.Outlined.InvertColors),
     Warmth("Warmth", Icons.Outlined.Thermostat),
     Tint("Tint", Icons.Outlined.Palette),
+    Highlights("Highlights", Icons.Outlined.Highlight),
+    Shadows("Shadows", Icons.Outlined.Tonality),
     Fade("Fade", Icons.Outlined.Gradient, min = 0f),
+    Sharpen("Sharpen", Icons.Outlined.Details, min = 0f),
+    Grain("Grain", Icons.Outlined.Grain, min = 0f),
     Vignette("Vignette", Icons.Outlined.Vignette, min = 0f),
 }
 
@@ -55,13 +65,22 @@ data class EditState(
     val adjust: Map<AdjustTool, Float> = emptyMap(),
     val filter: Filter = Filter.Original,
     val filterStrength: Float = 1f,
+    val curves: Curves = Curves(),
+    val strokes: List<MarkStroke> = emptyList(),
 ) {
     val hasGeometry get() = rotation != 0 || flipH || straighten != 0f || crop != NormRect.Full
-    val hasColor get() = filter != Filter.Original || adjust.values.any { it != 0f }
-    val isEdited get() = hasGeometry || hasColor
+    val hasColor get() = filter != Filter.Original || adjust.values.any { it != 0f } || !curves.isIdentity
+    val isEdited get() = hasGeometry || hasColor || strokes.isNotEmpty()
 
     fun value(tool: AdjustTool) = adjust[tool] ?: 0f
-    val vignette get() = value(AdjustTool.Vignette) / 100f
+
+    // Shader-side (non-matrix) parameters, 0..1 or -1..1.
+    private val fk get() = if (filter == Filter.Original) 0f else filterStrength
+    val vignette get() = (value(AdjustTool.Vignette) / 100f + filter.vignette * fk).coerceIn(0f, 1f)
+    val grain get() = (value(AdjustTool.Grain) / 100f + filter.grain * fk).coerceIn(0f, 1f)
+    val sharpen get() = value(AdjustTool.Sharpen) / 100f
+    val highlights get() = value(AdjustTool.Highlights) / 100f
+    val shadows get() = value(AdjustTool.Shadows) / 100f
 
     /** Full colour pipeline: filter (blended by strength) then the adjust sliders. */
     fun colorMatrix(): ColorMatrix {
@@ -126,16 +145,25 @@ private fun adjustMatrix(adjust: Map<AdjustTool, Float>): ColorMatrix {
     return out
 }
 
-enum class Filter(val label: String) {
+enum class Filter(val label: String, val grain: Float = 0f, val vignette: Float = 0f) {
     Original("Original"),
     Vivid("Vivid"),
     Warm("Warm"),
     Cool("Cool"),
     Golden("Golden"),
     Soft("Soft"),
-    Vintage("Vintage"),
+    Pastel("Pastel"),
+    Film("Film", grain = 0.35f),
+    Vintage("Vintage", grain = 0.2f, vignette = 0.35f),
+    Retro("Retro", vignette = 0.25f),
+    Teal("Teal"),
+    Chrome("Chrome"),
+    Lomo("Lomo", vignette = 0.6f),
+    Matte("Matte"),
+    Polar("Polar"),
+    Sepia("Sepia", grain = 0.15f),
     Mono("Mono"),
-    Noir("Noir");
+    Noir("Noir", grain = 0.25f, vignette = 0.3f);
 
     fun matrix(): ColorMatrix = when (this) {
         Original -> ColorMatrix()
@@ -144,6 +172,8 @@ enum class Filter(val label: String) {
         Cool -> chain(scaleOffset(0.92f, 1.0f, 1.08f, -6f, 0f, 12f), saturation(0.95f))
         Golden -> chain(scaleOffset(1.10f, 1.04f, 0.85f, 14f, 8f, -4f), contrast(1.06f), saturation(1.12f))
         Soft -> chain(contrast(0.82f), scaleOffset(1f, 1f, 1f, 14f, 14f, 16f), saturation(0.9f))
+        Pastel -> chain(saturation(0.7f), contrast(0.85f), scaleOffset(1f, 1f, 1.02f, 24f, 22f, 26f))
+        Film -> chain(contrast(0.88f), scaleOffset(1.02f, 1f, 0.95f, 12f, 10f, 8f), saturation(0.85f))
         Vintage -> chain(
             cm(
                 0.62f, 0.32f, 0.08f, 0f, 18f,
@@ -152,6 +182,32 @@ enum class Filter(val label: String) {
                 0f, 0f, 0f, 1f, 0f,
             ),
             contrast(0.9f),
+        )
+        Retro -> chain(
+            cm(
+                1.10f, 0.05f, -0.05f, 0f, 8f,
+                -0.05f, 1.05f, 0.05f, 0f, 0f,
+                0.05f, -0.10f, 0.85f, 0f, 28f,
+                0f, 0f, 0f, 1f, 0f,
+            ),
+            contrast(1.1f),
+        )
+        Teal -> chain(
+            cm(
+                1.12f, -0.06f, -0.06f, 0f, 4f,
+                -0.04f, 1.04f, 0f, 0f, 0f,
+                -0.10f, 0.10f, 1.10f, 0f, 6f,
+                0f, 0f, 0f, 1f, 0f,
+            ),
+            contrast(1.1f), saturation(1.1f),
+        )
+        Chrome -> chain(contrast(1.2f), saturation(1.2f), scaleOffset(1f, 1f, 1.04f, -6f, -4f, 0f))
+        Lomo -> chain(saturation(1.4f), contrast(1.25f))
+        Matte -> chain(contrast(0.78f), scaleOffset(1f, 1f, 1f, 22f, 20f, 22f), saturation(0.95f))
+        Polar -> chain(saturation(0.6f), scaleOffset(0.95f, 1.0f, 1.1f, 10f, 14f, 24f))
+        Sepia -> chain(
+            saturation(0f),
+            scaleOffset(1.07f, 0.88f, 0.66f, 18f, 8f, 0f),
         )
         Mono -> chain(saturation(0f), contrast(1.05f))
         Noir -> chain(saturation(0f), contrast(1.4f), scaleOffset(1f, 1f, 1f, -10f, -10f, -10f))

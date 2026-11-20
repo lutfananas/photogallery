@@ -16,8 +16,22 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.light(Palette.Paper.toArgb(), Palette.Charcoal.toArgb()),
         )
         super.onCreate(savedInstanceState)
+        requestHighestRefreshRate()
         setContent {
             GalleryTheme { GalleryRoot() }
         }
+    }
+
+    /**
+     * Some skins (e.g. HyperOS) keep apps at 60 Hz unless they ask. Pick the
+     * fastest mode at the current resolution so scrolling/editing runs at 120 Hz.
+     */
+    private fun requestHighestRefreshRate() {
+        val display = display ?: return
+        val current = display.mode
+        val best = display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+            .maxByOrNull { it.refreshRate } ?: return
+        window.attributes = window.attributes.apply { preferredDisplayModeId = best.modeId }
     }
 }

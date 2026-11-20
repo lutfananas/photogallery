@@ -59,6 +59,16 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.material.icons.automirrored.outlined.Undo
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -122,6 +132,36 @@ fun EditorScreen(
     var saving by remember { mutableStateOf(false) }
     var confirmDiscard by remember { mutableStateOf(false) }
 
+    // Markup tool settings.
+    var brush by remember { mutableStateOf(BrushMode.Pen) }
+    var brushColor by remember { mutableStateOf(Palette.Orange) }
+    var brushWidth by remember { mutableStateOf(0.012f) }
+    val strokeRedo = remember { mutableStateListOf<MarkStroke>() }
+
+    // Global undo/redo: a snapshot is committed once edits settle for a moment.
+    val undoStack = remember { mutableStateListOf<EditState>() }
+    val redoStack = remember { mutableStateListOf<EditState>() }
+    var committed by remember { mutableStateOf(EditState()) }
+    LaunchedEffect(Unit) {
+        @OptIn(FlowPreview::class)
+        snapshotFlow { state }.debounce(300).collect { s ->
+            if (s != committed) {
+                undoStack.add(committed)
+                if (undoStack.size > 50) undoStack.removeAt(0)
+                redoStack.clear()
+                committed = s
+            }
+        }
+    }
+    fun undo() {
+        val prev = undoStack.removeLastOrNull() ?: return
+        redoStack.add(state); committed = prev; state = prev
+    }
+    fun redo() {
+        val next = redoStack.removeLastOrNull() ?: return
+        undoStack.add(state); committed = next; state = next
+    }
+
     val requestClose = { if (state.isEdited) confirmDiscard = true else onClose() }
     BackHandler(enabled = !saving) { requestClose() }
 
@@ -133,8 +173,8 @@ fun EditorScreen(
     val geometry by produceState<Bitmap?>(null, base, state.straighten, state.crop, tab) {
         val b = base ?: return@produceState
         if (tab == EditTab.Crop && value != null) return@produceState
-        val geomOnly = state.copy(adjust = emptyMap(), filter = Filter.Original)
-        value = withContext(Dispatchers.Default) { ImageOps.render(b, geomOnly, withColor = false) }
+        val geomOnly = state
+        value = withContext(Dispatchers.Default) { ImageOps.render(b, geomOnly) }
     }
 
     fun save() {
@@ -142,10 +182,9 @@ fun EditorScreen(
         saving = true
         scope.launch {
             val newId = runCatching {
+                val snapshot = state
                 val bitmap = withContext(Dispatchers.Default) {
-                    val full = ImageOps.decode(context, p.uri, EXPORT_MAX)
-                    val rotated = ImageOps.rotateFlip(full, state.rotation, state.flipH)
-                    ImageOps.render(rotated, state, withColor = true)
+                    ImageOps.export(ImageOps.decode(context, p.uri, EXPORT_MAX), snapshot)
                 }
                 val uri = vm.repo.saveEdited(bitmap, p.name) ?: error("save failed")
                 vm.reloadNow()
@@ -179,14 +218,21 @@ fun EditorScreen(
             Text(
                 tab.title,
                 color = Palette.OnDark,
-                fontSize = 20.sp,
+                fontSize = 18.sp,
+                maxLines = 1,
                 modifier = Modifier.weight(1f),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
-            IconButton(onClick = { state = EditState() }, enabled = state.isEdited) {
+            IconButton(onClick = ::undo, enabled = undoStack.isNotEmpty()) {
                 Icon(
-                    Icons.Outlined.RestartAlt, "Reset",
-                    tint = if (state.isEdited) Palette.OnDark else Palette.OnDarkMuted.copy(alpha = .4f),
+                    Icons.AutoMirrored.Outlined.Undo, "Undo",
+                    tint = if (undoStack.isNotEmpty()) Palette.OnDark else Palette.OnDarkMuted.copy(alpha = .35f),
+                )
+            }
+            IconButton(onClick = ::redo, enabled = redoStack.isNotEmpty()) {
+                Icon(
+                    Icons.AutoMirrored.Outlined.Redo, "Redo",
+                    tint = if (redoStack.isNotEmpty()) Palette.OnDark else Palette.OnDarkMuted.copy(alpha = .35f),
                 )
             }
             Box(
@@ -214,12 +260,19 @@ fun EditorScreen(
             when {
                 loadError -> Text("Couldn't open this photo", color = Palette.OnDarkMuted)
                 source == null -> CircularProgressIndicator(color = Palette.Orange)
-                comparing -> FittedImage(source!!, null, 0f)
+                comparing -> FittedImage(source!!)
                 tab == EditTab.Crop && base != null -> CropCanvas(base, state) { state = it }
-                geometry != null -> FittedImage(
-                    geometry!!,
-                    if (state.hasColor) ColorFilter.colorMatrix(ColorMatrix(state.colorMatrixValues())) else null,
-                    state.vignette,
+                geometry != null -> EffectImage(
+                    bitmap = geometry!!,
+                    state = { state },
+                    markupEnabled = tab == EditTab.Markup,
+                    brush = brush,
+                    brushColor = brushColor,
+                    brushWidth = brushWidth,
+                    onStroke = {
+                        strokeRedo.clear()
+                        state = state.copy(strokes = state.strokes + it)
+                    },
                 )
                 else -> CircularProgressIndicator(color = Palette.Orange)
             }
@@ -232,16 +285,39 @@ fun EditorScreen(
         }
 
         // ---- tool panel ----
+        val panelHeight by animateDpAsState(
+            when (tab) {
+                EditTab.Curves -> 268.dp
+                EditTab.Markup -> 228.dp
+                else -> 196.dp
+            },
+            label = "panelHeight",
+        )
         AnimatedContent(
             targetState = tab,
             transitionSpec = { fadeIn() togetherWith fadeOut() },
             label = "panel",
-            modifier = Modifier.fillMaxWidth().height(196.dp),
+            modifier = Modifier.fillMaxWidth().height(panelHeight),
         ) { t ->
             when (t) {
                 EditTab.Crop -> CropPanel(state, base) { state = it }
                 EditTab.Adjust -> AdjustPanel(state, tool, onTool = { tool = it }) { state = it }
                 EditTab.Filters -> FilterPanel(state, geometry) { state = it }
+                EditTab.Curves -> CurvesPanel(state.curves) { state = state.copy(curves = it) }
+                EditTab.Markup -> MarkupPanel(
+                    brush = brush, onBrush = { brush = it },
+                    color = brushColor, onColor = { brushColor = it },
+                    width = brushWidth, onWidth = { brushWidth = it },
+                    canUndo = state.strokes.isNotEmpty(),
+                    canRedo = strokeRedo.isNotEmpty(),
+                    onUndo = {
+                        state.strokes.lastOrNull()?.let { strokeRedo.add(it) }
+                        state = state.copy(strokes = state.strokes.dropLast(1))
+                    },
+                    onRedo = {
+                        strokeRedo.removeLastOrNull()?.let { state = state.copy(strokes = state.strokes + it) }
+                    },
+                )
             }
         }
 
@@ -253,17 +329,20 @@ fun EditorScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = requestClose) { Icon(Icons.Outlined.Close, "Cancel", tint = Palette.OnDark) }
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly) {
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.Center,
+            ) {
                 EditTab.entries.forEach { t ->
                     Text(
                         t.label,
                         color = if (t == tab) Palette.Orange else Palette.OnDark,
-                        fontSize = 18.sp,
+                        fontSize = 16.sp,
                         fontWeight = if (t == tab) FontWeight.Medium else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
                             .clickable { tab = t }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                            .padding(horizontal = 9.dp, vertical = 8.dp),
                     )
                 }
             }
@@ -302,29 +381,49 @@ private fun AspectFit(aspect: Float, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun FittedImage(bitmap: Bitmap, filter: ColorFilter?, vignette: Float) {
+private fun FittedImage(bitmap: Bitmap) {
     val image = remember(bitmap) { bitmap.asImageBitmap() }
+    AspectFit(bitmap.width.toFloat() / bitmap.height) {
+        Image(image, null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+    }
+}
+
+/**
+ * The live preview: the colour pipeline runs as a RenderEffect on the image's
+ * layer, so slider changes only touch GPU uniforms (no recomposition of the image).
+ */
+@Composable
+private fun EffectImage(
+    bitmap: Bitmap,
+    state: () -> EditState,
+    markupEnabled: Boolean,
+    brush: BrushMode,
+    brushColor: Color,
+    brushWidth: Float,
+    onStroke: (MarkStroke) -> Unit,
+) {
+    val image = remember(bitmap) { bitmap.asImageBitmap() }
+    val shader = remember { GpuEffects.newShader() }
+    val curves = state().curves
+    val lut = remember(curves) { GpuEffects.lutShader(curves.lutBitmap()) }
     AspectFit(bitmap.width.toFloat() / bitmap.height) {
         Image(
             image, null,
-            colorFilter = filter,
             contentScale = ContentScale.FillBounds,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().graphicsLayer {
+                val s = state()
+                renderEffect = if (!s.hasColor) null
+                else GpuEffects.effect(shader, s, lut, size.width, size.height).asComposeRenderEffect()
+            },
         )
-        if (vignette > 0f) {
-            Canvas(Modifier.fillMaxSize()) {
-                val alpha = vignette * 0.85f
-                drawRect(
-                    Brush.radialGradient(
-                        0f to Color.Transparent,
-                        0.45f to Color.Transparent,
-                        1f to Color.Black.copy(alpha = alpha),
-                        center = center,
-                        radius = hypot(size.width, size.height) / 2f,
-                    )
-                )
-            }
-        }
+        MarkupLayer(
+            strokes = state().strokes,
+            enabled = markupEnabled,
+            brush = brush,
+            color = brushColor,
+            width = brushWidth,
+            onStroke = onStroke,
+        )
     }
 }
 
@@ -490,7 +589,7 @@ private fun FilterPanel(state: EditState, geometry: Bitmap?, onChange: (EditStat
             items(Filter.entries) { f ->
                 val selected = state.filter == f
                 Column(
-                    Modifier.width(68.dp).clickable { onChange(state.copy(filter = f, filterStrength = 1f)) },
+                    Modifier.width(76.dp).clickable { onChange(state.copy(filter = f, filterStrength = 1f)) },
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
@@ -501,11 +600,17 @@ private fun FilterPanel(state: EditState, geometry: Bitmap?, onChange: (EditStat
                             .then(if (selected) Modifier.border(2.dp, Palette.Orange, RoundedCornerShape(16.dp)) else Modifier)
                     ) {
                         if (thumb != null) {
-                            val cf = remember(f) {
-                                if (f == Filter.Original) null
-                                else ColorFilter.colorMatrix(ColorMatrix(f.matrix().array.copyOf()))
-                            }
-                            Image(thumb, f.label, colorFilter = cf, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                            val shader = remember { GpuEffects.newShader() }
+                            val lut = remember { GpuEffects.lutShader(Curves().lutBitmap()) }
+                            val preview = remember(f) { EditState(filter = f) }
+                            Image(
+                                thumb, f.label,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().graphicsLayer {
+                                    renderEffect = if (f == Filter.Original) null
+                                    else GpuEffects.effect(shader, preview, lut, size.width, size.height).asComposeRenderEffect()
+                                },
+                            )
                         }
                     }
                     Spacer(Modifier.height(8.dp))

@@ -3,16 +3,12 @@ package com.lutfan.photogallery.ui.editor
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import android.net.Uri
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -57,11 +53,8 @@ object ImageOps {
         return max(c + (h / w) * s, c + (w / h) * s)
     }
 
-    /**
-     * Straighten + crop (+ colour + vignette when [withColor]) on an already
-     * rotated/flipped bitmap. Mirrors what the preview shows.
-     */
-    fun render(base: Bitmap, state: EditState, withColor: Boolean): Bitmap {
+    /** Straighten + crop on an already rotated/flipped bitmap (colour is done on the GPU). */
+    fun render(base: Bitmap, state: EditState): Bitmap {
         val bw = base.width.toFloat()
         val bh = base.height.toFloat()
         val crop = state.crop
@@ -70,35 +63,38 @@ object ImageOps {
         val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        if (withColor && state.hasColor) paint.colorFilter = ColorMatrixColorFilter(state.colorMatrix())
-
         val scale = straightenScale(state.straighten, bw, bh)
-        canvas.save()
         canvas.translate(-crop.l * bw, -crop.t * bh)
         canvas.translate(bw / 2f, bh / 2f)
         canvas.rotate(state.straighten)
         canvas.scale(scale, scale)
         canvas.translate(-bw / 2f, -bh / 2f)
         canvas.drawBitmap(base, 0f, 0f, paint)
-        canvas.restore()
-
-        if (withColor && state.vignette > 0f) {
-            val v = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = vignetteShader(outW.toFloat(), outH.toFloat(), state.vignette)
-            }
-            canvas.drawRect(0f, 0f, outW.toFloat(), outH.toFloat(), v)
-        }
         return out
     }
 
-    private fun vignetteShader(w: Float, h: Float, amount: Float): Shader {
-        val alpha = (amount * 0.85f * 255).roundToInt().coerceIn(0, 255)
-        return RadialGradient(
-            w / 2f, h / 2f, hypot(w, h) / 2f,
-            intArrayOf(0x00000000, 0x00000000, alpha shl 24),
-            floatArrayOf(0f, 0.45f, 1f),
-            Shader.TileMode.CLAMP,
-        )
+    /** Full-resolution export: geometry → GPU colour pipeline → markup. */
+    fun export(full: Bitmap, state: EditState): Bitmap {
+        val rotated = rotateFlip(full, state.rotation, state.flipH)
+        val geo = render(rotated, state)
+        val colored = if (!state.hasColor) geo else runCatching { GpuEffects.applyForExport(geo, state) }
+            .getOrElse { cpuColorFallback(geo, state) }
+        if (state.strokes.isNotEmpty()) {
+            val mutable = if (colored.isMutable) colored else colored.copy(Bitmap.Config.ARGB_8888, true)
+            MarkupRenderer.draw(Canvas(mutable), state.strokes, mutable.width.toFloat(), mutable.height.toFloat())
+            return mutable
+        }
+        return colored
+    }
+
+    /** Matrix-only colour (no curves/grain) if the GPU path is unavailable. */
+    private fun cpuColorFallback(src: Bitmap, state: EditState): Bitmap {
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+            colorFilter = android.graphics.ColorMatrixColorFilter(state.colorMatrix())
+        }
+        Canvas(out).drawBitmap(src, 0f, 0f, paint)
+        return out
     }
 
     /** Largest centred crop with the given pixel ratio (w/h) inside a frame of [frameRatio]. */

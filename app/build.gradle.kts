@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.lutfan.photogallery"
-        minSdk = 30
+        minSdk = 33
         targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
@@ -48,6 +48,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
 
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
     implementation("androidx.activity:activity-compose:1.12.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
