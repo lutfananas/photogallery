@@ -8,6 +8,14 @@ import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.navigation.NamedNavArgument
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavGraphBuilder
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -137,13 +145,27 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
     StatusBarIcons(darkIcons = !darkScreen)
 
     Box(Modifier.fillMaxSize()) {
+        SharedTransitionLayout {
+        CompositionLocalProvider(LocalSharedScope provides this) {
         NavHost(
             navController = nav,
             startDestination = Routes.HOME,
-            enterTransition = { fadeIn() },
-            exitTransition = { fadeOut() },
+            // Opening a photo keeps the grid underneath so the photo grows out of it;
+            // going back reveals the grid immediately while the photo shrinks into place.
+            enterTransition = {
+                if (targetState.isViewer()) fadeIn(tween(260)) else fadeIn(tween(220))
+            },
+            exitTransition = {
+                if (targetState.isViewer()) ExitTransition.KeepUntilTransitionsFinished else fadeOut(tween(180))
+            },
+            popEnterTransition = {
+                if (initialState.isViewer()) EnterTransition.None else fadeIn(tween(220))
+            },
+            popExitTransition = {
+                if (initialState.isViewer()) fadeOut(tween(260)) else fadeOut(tween(180))
+            },
         ) {
-            composable(Routes.HOME) {
+            screen(Routes.HOME) {
                 HomeScreen(
                     vm = vm,
                     partialAccess = access == MediaAccess.Partial,
@@ -154,10 +176,10 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     onPhoto = { nav.navigate(Routes.viewer(PhotoSource.All, it)) },
                 )
             }
-            composable(Routes.FAVORITES) {
+            screen(Routes.FAVORITES) {
                 FavoritesScreen(vm) { nav.navigate(Routes.viewer(PhotoSource.Favorites, it)) }
             }
-            composable(Routes.PROFILE) {
+            screen(Routes.PROFILE) {
                 ProfileScreen(
                     vm = vm,
                     partialAccess = access == MediaAccess.Partial,
@@ -165,10 +187,10 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     onAlbums = { nav.navigate(Routes.ALBUMS) },
                 )
             }
-            composable(Routes.ALBUMS) {
+            screen(Routes.ALBUMS) {
                 AlbumsScreen(vm, onBack = { nav.popBackStack() }, onAlbum = { nav.navigate(Routes.album(it)) })
             }
-            composable(Routes.SEARCH) {
+            screen(Routes.SEARCH) {
                 SearchScreen(
                     vm,
                     onBack = { nav.popBackStack() },
@@ -176,7 +198,7 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     onAlbum = { nav.navigate(Routes.album(it)) },
                 )
             }
-            composable(
+            screen(
                 "album/{id}",
                 arguments = listOf(navArgument("id") { type = NavType.LongType }),
             ) { e ->
@@ -187,7 +209,7 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     onPhoto = { nav.navigate(Routes.viewer(PhotoSource.InAlbum(id), it)) },
                 )
             }
-            composable(
+            screen(
                 "viewer/{source}/{id}",
                 arguments = listOf(
                     navArgument("source") { type = NavType.StringType },
@@ -202,7 +224,7 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     onEdit = { nav.navigate(Routes.editor(it)) },
                 )
             }
-            composable(
+            screen(
                 "editor/{id}",
                 arguments = listOf(navArgument("id") { type = NavType.LongType }),
             ) { e ->
@@ -216,6 +238,8 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     },
                 )
             }
+        }
+        }
         }
 
         AnimatedVisibility(
@@ -246,6 +270,17 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
             )
         }
     }
+}
+
+private fun NavBackStackEntry.isViewer() = destination.route?.startsWith("viewer") == true
+
+/** `composable` that also exposes its AnimatedVisibilityScope for shared elements. */
+private fun NavGraphBuilder.screen(
+    route: String,
+    arguments: List<NamedNavArgument> = emptyList(),
+    content: @Composable (NavBackStackEntry) -> Unit,
+) = composable(route, arguments) { entry ->
+    CompositionLocalProvider(LocalNavScope provides this) { content(entry) }
 }
 
 @Composable

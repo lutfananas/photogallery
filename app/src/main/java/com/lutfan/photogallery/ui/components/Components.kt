@@ -47,7 +47,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import com.lutfan.photogallery.ui.sharedPhoto
+import com.lutfan.photogallery.ui.thumbCacheKey
 import com.lutfan.photogallery.data.Photo
 import com.lutfan.photogallery.ui.theme.Palette
 
@@ -127,11 +131,19 @@ fun PhotoTile(
             .background(Palette.Line)
             .clickable(onClick = onClick)
     ) {
+        val context = LocalContext.current
+        val request = remember(photo.id) {
+            ImageRequest.Builder(context)
+                .data(photo.uri)
+                .memoryCacheKey(thumbCacheKey(photo.id))
+                .size(720)
+                .build()
+        }
         AsyncImage(
-            model = photo.uri,
+            model = request,
             contentDescription = photo.name,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().sharedPhoto(photo.id),
         )
         if (favorite) {
             Icon(

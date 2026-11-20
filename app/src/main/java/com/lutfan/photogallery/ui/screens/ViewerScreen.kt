@@ -15,6 +15,34 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import coil3.memory.MemoryCache
+import coil3.request.ImageRequest
+import com.lutfan.photogallery.ui.sharedPhoto
+import com.lutfan.photogallery.ui.thumbCacheKey
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -91,8 +119,11 @@ fun ViewerScreen(
     }
     val startIndex = photos.indexOfFirst { it.id == startId }.coerceAtLeast(0)
     val pager = rememberPagerState(initialPage = startIndex) { photos.size }
-    var chrome by remember { mutableStateOf(true) }
+    // Bars start hidden; a single tap brings them in.
+    var chrome by remember { mutableStateOf(false) }
     var zoomed by remember { mutableStateOf(false) }
+    var dismiss by remember { mutableFloatStateOf(0f) } // 0..1 while swiping down to close
+    ImmersiveSystemBars(visible = chrome && dismiss == 0f)
     var showInfo by remember { mutableStateOf(false) }
     val current = photos.getOrNull(pager.currentPage.coerceIn(0, photos.lastIndex)) ?: photos.first()
 
@@ -100,7 +131,7 @@ fun ViewerScreen(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { vm.refresh() }
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF1E1E1E))) {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 1f - dismiss))) {
         HorizontalPager(
             state = pager,
             userScrollEnabled = !zoomed,
@@ -108,14 +139,22 @@ fun ViewerScreen(
             key = { photos[it].id },
             modifier = Modifier.fillMaxSize(),
         ) { page ->
-            ZoomableImage(
+            ZoomablePhoto(
                 photo = photos[page],
+                isCurrent = page == pager.currentPage,
                 onTap = { chrome = !chrome },
                 onZoomChange = { if (page == pager.currentPage) zoomed = it },
+                onDismissProgress = { dismiss = it },
+                onDismiss = onBack,
             )
         }
 
-        AnimatedVisibility(chrome, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
+        AnimatedVisibility(
+            chrome && dismiss == 0f,
+            enter = fadeIn(tween(200)) + slideInVertically(tween(220)) { -it / 2 },
+            exit = fadeOut(tween(160)) + slideOutVertically(tween(200)) { -it / 2 },
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -139,7 +178,12 @@ fun ViewerScreen(
             }
         }
 
-        AnimatedVisibility(chrome, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
+        AnimatedVisibility(
+            chrome && dismiss == 0f,
+            enter = fadeIn(tween(200)) + slideInVertically(tween(220)) { it / 2 },
+            exit = fadeOut(tween(160)) + slideOutVertically(tween(200)) { it / 2 },
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
             Row(
                 Modifier
                     .navigationBarsPadding()
@@ -225,58 +269,200 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
+/** Hides status + navigation bars while the viewer's own bars are hidden. */
 @Composable
-private fun ZoomableImage(photo: Photo, onTap: () -> Unit, onZoomChange: (Boolean) -> Unit) {
+private fun ImmersiveSystemBars(visible: Boolean) {
+    val activity = LocalActivity.current ?: return
+    val controller = remember(activity) {
+        WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+    LaunchedEffect(visible) {
+        if (visible) controller.show(WindowInsetsCompat.Type.systemBars())
+        else controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+    DisposableEffect(controller) {
+        onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
+    }
+}
+
+private const val MAX_ZOOM = 6f
+private const val DOUBLE_TAP_ZOOM = 2.5f
+private val zoomSpring = spring<Float>(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow)
+
+/**
+ * One page of the viewer:
+ * - single tap → toggle bars, double tap → animated zoom to the tapped point / back
+ * - two fingers → pinch zoom in/out around the fingers (springs back below 1×)
+ * - one finger when zoomed → pan; when not zoomed, vertical drag → swipe down to close
+ */
+@Composable
+private fun ZoomablePhoto(
+    photo: Photo,
+    isCurrent: Boolean,
+    onTap: () -> Unit,
+    onZoomChange: (Boolean) -> Unit,
+    onDismissProgress: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var dismissY by remember { mutableFloatStateOf(0f) }
+    var container by remember { mutableStateOf(IntSize.Zero) }
+    var anim by remember { mutableStateOf<Job?>(null) }
 
-    fun clamp(o: Offset, s: Float, w: Int, h: Int): Offset {
-        val maxX = w * (s - 1f) / 2f
-        val maxY = h * (s - 1f) / 2f
+    val aspect = if (photo.width > 0 && photo.height > 0) photo.aspect else 0f
+
+    fun fittedSize(): Size {
+        val cw = container.width.toFloat()
+        val ch = container.height.toFloat()
+        if (aspect <= 0f || cw == 0f || ch == 0f) return Size(cw, ch)
+        return if (aspect > cw / ch) Size(cw, cw / aspect) else Size(ch * aspect, ch)
+    }
+
+    fun clamp(o: Offset, s: Float): Offset {
+        val f = fittedSize()
+        val maxX = max(0f, (f.width * s - container.width) / 2f)
+        val maxY = max(0f, (f.height * s - container.height) / 2f)
         return Offset(o.x.coerceIn(-maxX, maxX), o.y.coerceIn(-maxY, maxY))
     }
 
-    AsyncImage(
-        model = photo.uri,
-        contentDescription = photo.name,
-        contentScale = ContentScale.Fit,
-        modifier = Modifier
+    /** Springs scale/offset to a target together. */
+    fun animateTo(targetScale: Float, targetOffset: Offset) {
+        anim?.cancel()
+        val startScale = scale
+        val startOffset = offset
+        anim = scope.launch {
+            animate(0f, 1f, animationSpec = zoomSpring) { t, _ ->
+                scale = startScale + (targetScale - startScale) * t
+                offset = startOffset + (targetOffset - startOffset) * t
+            }
+        }
+        onZoomChange(targetScale > 1.01f)
+    }
+
+    // Reset zoom when the page is swiped away.
+    LaunchedEffect(isCurrent) {
+        if (!isCurrent && scale != 1f) {
+            anim?.cancel(); scale = 1f; offset = Offset.Zero
+        }
+    }
+
+    val request = remember(photo.id) {
+        ImageRequest.Builder(context)
+            .data(photo.uri)
+            .placeholderMemoryCacheKey(MemoryCache.Key(thumbCacheKey(photo.id)))
+            .memoryCacheKey("full:${photo.id}")
+            .size(2560)
+            .build()
+    }
+
+    Box(
+        Modifier
             .fillMaxSize()
+            .onSizeChanged { container = it }
             .pointerInput(photo.id) {
                 detectTapGestures(
                     onTap = { onTap() },
                     onDoubleTap = { tap ->
-                        if (scale > 1f) {
-                            scale = 1f; offset = Offset.Zero
+                        if (scale > 1.01f) {
+                            animateTo(1f, Offset.Zero)
                         } else {
-                            scale = 2.5f
                             val center = Offset(size.width / 2f, size.height / 2f)
-                            offset = clamp((center - tap) * 1.5f, scale, size.width, size.height)
+                            // Keep the tapped point under the finger.
+                            val target = clamp((center - tap) * (DOUBLE_TAP_ZOOM - 1f), DOUBLE_TAP_ZOOM)
+                            animateTo(DOUBLE_TAP_ZOOM, target)
                         }
-                        onZoomChange(scale > 1f)
                     },
                 )
             }
             .pointerInput(photo.id) {
+                val slop = viewConfiguration.touchSlop
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
+                    // 0 = undecided, 1 = zoom/pan, 2 = swipe-to-close, 3 = leave it to the pager
+                    var mode = 0
+                    var travel = Offset.Zero
                     do {
                         val event = awaitPointerEvent()
-                        val multi = event.changes.count { it.pressed } > 1
-                        if (multi || scale > 1f) {
-                            val zoom = event.calculateZoom()
-                            val pan = event.calculatePan()
-                            scale = (scale * zoom).coerceIn(1f, 5f)
-                            offset = if (scale == 1f) Offset.Zero else clamp(offset + pan, scale, size.width, size.height)
-                            onZoomChange(scale > 1f)
-                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        val fingers = event.changes.count { it.pressed }
+                        if (mode == 0 || mode == 3) {
+                            if (fingers >= 2) mode = 1
+                            else if (mode == 0 && scale > 1.01f) mode = 1
+                        }
+                        when (mode) {
+                            0 -> {
+                                travel += event.calculatePan()
+                                if (travel.getDistance() > slop) {
+                                    mode = if (abs(travel.y) > abs(travel.x) * 1.3f) 2 else 3
+                                }
+                            }
+                            1 -> {
+                                anim?.cancel()
+                                val zoom = event.calculateZoom()
+                                val pan = event.calculatePan()
+                                val centroid = event.calculateCentroid(useCurrent = true)
+                                val newScale = (scale * zoom).coerceIn(0.6f, MAX_ZOOM)
+                                val z = newScale / scale
+                                val center = Offset(size.width / 2f, size.height / 2f)
+                                var o = offset * z + (centroid - center) * (1f - z) + pan
+                                if (newScale >= 1f) o = clamp(o, newScale)
+                                scale = newScale
+                                offset = o
+                                onZoomChange(newScale > 1.01f)
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                            2 -> {
+                                dismissY += event.calculatePan().y
+                                onDismissProgress((abs(dismissY) / (size.height * 0.5f)).coerceIn(0f, 1f))
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
                         }
                     } while (event.changes.any { it.pressed })
+
+                    when (mode) {
+                        1 -> when {
+                            scale < 1f -> animateTo(1f, Offset.Zero)
+                            else -> {
+                                val c = clamp(offset, scale)
+                                if (c != offset) animateTo(scale, c)
+                            }
+                        }
+                        2 -> if (abs(dismissY) > size.height * 0.14f) {
+                            onDismiss()
+                        } else {
+                            val start = dismissY
+                            scope.launch {
+                                animate(start, 0f, animationSpec = zoomSpring) { v, _ ->
+                                    dismissY = v
+                                    onDismissProgress((abs(v) / (size.height * 0.5f)).coerceIn(0f, 1f))
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            .graphicsLayer {
-                scaleX = scale; scaleY = scale
-                translationX = offset.x; translationY = offset.y
             },
-    )
+        contentAlignment = Alignment.Center,
+    ) {
+        val sized = if (aspect > 0f) {
+            val containerAspect = if (container.height > 0) container.width / container.height.toFloat() else 1f
+            Modifier.aspectRatio(aspect, matchHeightConstraintsFirst = aspect < containerAspect)
+        } else Modifier.fillMaxSize()
+        AsyncImage(
+            model = request,
+            contentDescription = photo.name,
+            contentScale = if (aspect > 0f) ContentScale.Crop else ContentScale.Fit,
+            modifier = sized
+                // Layout offset (not a layer) so the shared-element return starts from where the photo was dragged.
+                .offset { IntOffset(0, dismissY.roundToInt()) }
+                .sharedPhoto(photo.id, enabled = isCurrent)
+                .graphicsLayer {
+                    scaleX = scale; scaleY = scale
+                    translationX = offset.x; translationY = offset.y
+                },
+        )
+    }
 }
