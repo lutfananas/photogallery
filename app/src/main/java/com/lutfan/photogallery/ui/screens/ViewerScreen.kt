@@ -24,12 +24,13 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -310,7 +311,7 @@ private fun ZoomablePhoto(
     val scope = rememberCoroutineScope()
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
-    var dismissY by remember { mutableFloatStateOf(0f) }
+    var drag by remember { mutableStateOf(Offset.Zero) } // swipe-to-close offset
     var container by remember { mutableStateOf(IntSize.Zero) }
     var anim by remember { mutableStateOf<Job?>(null) }
 
@@ -386,6 +387,9 @@ private fun ZoomablePhoto(
                     // 0 = undecided, 1 = zoom/pan, 2 = swipe-to-close, 3 = leave it to the pager
                     var mode = 0
                     var travel = Offset.Zero
+                    val velocity = VelocityTracker()
+                    val dismissDistance = size.height * 0.5f
+                    fun progress(d: Offset) = (d.y / dismissDistance).coerceIn(0f, 1f)
                     do {
                         val event = awaitPointerEvent()
                         val fingers = event.changes.count { it.pressed }
@@ -397,7 +401,9 @@ private fun ZoomablePhoto(
                             0 -> {
                                 travel += event.calculatePan()
                                 if (travel.getDistance() > slop) {
-                                    mode = if (abs(travel.y) > abs(travel.x) * 1.3f) 2 else 3
+                                    // Only a downward drag starts swipe-to-close; sideways goes to the pager.
+                                    mode = if (travel.y > 0f && travel.y > abs(travel.x) * 1.2f) 2 else 3
+                                    if (mode == 2) drag = travel
                                 }
                             }
                             1 -> {
@@ -416,8 +422,10 @@ private fun ZoomablePhoto(
                                 event.changes.forEach { if (it.positionChanged()) it.consume() }
                             }
                             2 -> {
-                                dismissY += event.calculatePan().y
-                                onDismissProgress((abs(dismissY) / (size.height * 0.5f)).coerceIn(0f, 1f))
+                                // The photo follows the finger freely (like iOS Photos).
+                                drag += event.calculatePan()
+                                event.changes.firstOrNull()?.let { velocity.addPosition(it.uptimeMillis, it.position) }
+                                onDismissProgress(progress(drag))
                                 event.changes.forEach { if (it.positionChanged()) it.consume() }
                             }
                         }
@@ -431,14 +439,20 @@ private fun ZoomablePhoto(
                                 if (c != offset) animateTo(scale, c)
                             }
                         }
-                        2 -> if (abs(dismissY) > size.height * 0.14f) {
-                            onDismiss()
-                        } else {
-                            val start = dismissY
-                            scope.launch {
-                                animate(start, 0f, animationSpec = zoomSpring) { v, _ ->
-                                    dismissY = v
-                                    onDismissProgress((abs(v) / (size.height * 0.5f)).coerceIn(0f, 1f))
+                        2 -> {
+                            val vy = velocity.calculateVelocity().y
+                            val flick = vy > 1200f && drag.y > 0f
+                            if (flick || drag.y > size.height * 0.12f) {
+                                // Back to the grid: the shared-element transition carries the photo
+                                // from where it is now down into its tile.
+                                onDismiss()
+                            } else {
+                                val start = drag
+                                scope.launch {
+                                    animate(0f, 1f, animationSpec = zoomSpring) { t, _ ->
+                                        drag = start * (1f - t)
+                                        onDismissProgress(progress(drag))
+                                    }
                                 }
                             }
                         }
@@ -456,8 +470,22 @@ private fun ZoomablePhoto(
             contentDescription = photo.name,
             contentScale = if (aspect > 0f) ContentScale.Crop else ContentScale.Fit,
             modifier = sized
-                // Layout offset (not a layer) so the shared-element return starts from where the photo was dragged.
-                .offset { IntOffset(0, dismissY.roundToInt()) }
+                // Done in layout (not a graphics layer) so the shared-element return
+                // starts from exactly where, and how small, the dragged photo is.
+                .layout { measurable, constraints ->
+                    val w = constraints.maxWidth
+                    val h = constraints.maxHeight
+                    val k = 1f - 0.4f * (drag.y / (container.height * 0.5f).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    val cw = (w * k).roundToInt().coerceAtLeast(1)
+                    val ch = (h * k).roundToInt().coerceAtLeast(1)
+                    val placeable = measurable.measure(Constraints.fixed(cw, ch))
+                    layout(w, h) {
+                        placeable.place(
+                            ((w - cw) / 2f + drag.x).roundToInt(),
+                            ((h - ch) / 2f + drag.y).roundToInt(),
+                        )
+                    }
+                }
                 .sharedPhoto(photo.id, enabled = isCurrent)
                 .graphicsLayer {
                     scaleX = scale; scaleY = scale
