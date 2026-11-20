@@ -89,6 +89,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -408,14 +409,18 @@ private fun ZoomablePhoto(
                             }
                             1 -> {
                                 anim?.cancel()
-                                val zoom = event.calculateZoom()
-                                val pan = event.calculatePan()
-                                val centroid = event.calculateCentroid(useCurrent = true)
+                                // Only fingers that were down in both frames count, so lifting a
+                                // finger never makes the photo jump or produce NaN (which blanked it).
+                                val t = event.stableTransform() ?: continue
+                                val zoom = t.zoom
+                                val pan = t.pan
+                                val centroid = t.centroid
                                 val newScale = (scale * zoom).coerceIn(0.6f, MAX_ZOOM)
                                 val z = newScale / scale
                                 val center = Offset(size.width / 2f, size.height / 2f)
                                 var o = offset * z + (centroid - center) * (1f - z) + pan
                                 if (newScale >= 1f) o = clamp(o, newScale)
+                                if (!newScale.isFinite() || !o.x.isFinite() || !o.y.isFinite()) continue
                                 scale = newScale
                                 offset = o
                                 onZoomChange(newScale > 1.01f)
@@ -431,6 +436,9 @@ private fun ZoomablePhoto(
                         }
                     } while (event.changes.any { it.pressed })
 
+                    if (!scale.isFinite() || !offset.x.isFinite() || !offset.y.isFinite()) {
+                        scale = 1f; offset = Offset.Zero
+                    }
                     when (mode) {
                         1 -> when {
                             scale < 1f -> animateTo(1f, Offset.Zero)
@@ -493,4 +501,27 @@ private fun ZoomablePhoto(
                 },
         )
     }
+}
+
+private class Transform(val zoom: Float, val pan: Offset, val centroid: Offset)
+
+/**
+ * Pinch/pan from the pointers pressed in both the previous and current frame.
+ * Returns null when fewer than one such pointer exists (e.g. all fingers lifted).
+ */
+private fun PointerEvent.stableTransform(): Transform? {
+    val pts = changes.filter { it.pressed && it.previousPressed }
+    if (pts.isEmpty()) return null
+    var cur = Offset.Zero
+    var prev = Offset.Zero
+    pts.forEach { cur += it.position; prev += it.previousPosition }
+    cur /= pts.size.toFloat()
+    prev /= pts.size.toFloat()
+    var zoom = 1f
+    if (pts.size >= 2) {
+        val curSpread = pts.sumOf { (it.position - cur).getDistance().toDouble() }
+        val prevSpread = pts.sumOf { (it.previousPosition - prev).getDistance().toDouble() }
+        if (curSpread > 0.0 && prevSpread > 0.0) zoom = (curSpread / prevSpread).toFloat()
+    }
+    return Transform(zoom, cur - prev, cur)
 }
