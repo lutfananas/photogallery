@@ -55,4 +55,5 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.10.1")
 
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
+    implementation("io.github.kyant0:backdrop:2.0.1")
 }

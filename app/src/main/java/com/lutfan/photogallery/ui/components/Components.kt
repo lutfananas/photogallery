@@ -86,13 +86,10 @@ fun FloatingNavBar(
     onSelect: (Tab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    GlassSurface(modifier.fillMaxWidth().height(76.dp)) {
     Row(
-        modifier
-            .fillMaxWidth()
-            .shadow(18.dp, RoundedCornerShape(30.dp), ambientColor = Color.Black.copy(.25f))
-            .clip(RoundedCornerShape(30.dp))
-            .background(Palette.Charcoal)
-            .height(76.dp)
+        Modifier
+            .fillMaxSize()
             .padding(horizontal = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -124,6 +121,7 @@ fun FloatingNavBar(
                 }
             }
         }
+    }
     }
 }
 
@@ -229,13 +227,10 @@ fun SelectionBar(
     onFavorite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    GlassSurface(modifier.fillMaxWidth().height(76.dp)) {
     Row(
-        modifier
-            .fillMaxWidth()
-            .shadow(18.dp, RoundedCornerShape(30.dp), ambientColor = Color.Black.copy(.25f))
-            .clip(RoundedCornerShape(30.dp))
-            .background(Palette.Charcoal)
-            .height(76.dp)
+        Modifier
+            .fillMaxSize()
             .padding(start = 8.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -258,6 +253,7 @@ fun SelectionBar(
             highlight = true,
             onClick = onFavorite,
         )
+    }
     }
 }
 

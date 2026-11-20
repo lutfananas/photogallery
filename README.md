@@ -6,6 +6,9 @@ A photo gallery for Android 13+ (targets **Android 17 / API 37**), built with Ko
 
 **Gallery**
 - Discover: album circles, staggered photo grid, search
+- Pinch the Home grid to zoom, like iOS Photos: 2 large-card columns, or a dense 3–6 column square grid
+- Long-press to multi-select, then share or favorite in bulk
+- Liquid-glass nav and selection bars (backdrop blur, edge refraction, vibrancy)
 - Albums, album detail, favorites, profile/stats
 - Full-screen viewer: swipe, pinch/double-tap zoom, share, favorite, move to trash, details sheet
 - Camera button opens the system camera and saves to DCIM/Camera
@@ -34,5 +37,6 @@ A photo gallery for Android 13+ (targets **Android 17 / API 37**), built with Ko
 Requires JDK 17+ and Android SDK platform 37.
 
 ## Credits
-The editor's tool set (crop, filters, tone curves, draw modes) was modeled on the single-edit tools of
+- Liquid glass comes from [Kyant's backdrop library](https://github.com/Kyant0/AndroidLiquidGlass) (Apache-2.0).
+- The editor's tool set (crop, filters, tone curves, draw modes) was modeled on the single-edit tools of
 [ImageToolbox](https://github.com/T8RIN/ImageToolbox) by T8RIN (Apache-2.0). The implementation here is our own and contains no ImageToolbox code.

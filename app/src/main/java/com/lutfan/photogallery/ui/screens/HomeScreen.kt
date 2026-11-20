@@ -35,6 +35,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.launch
 import com.lutfan.photogallery.GalleryViewModel
 import com.lutfan.photogallery.ui.components.CircleThumb
 import com.lutfan.photogallery.ui.components.EmptyState
@@ -53,17 +79,71 @@ fun HomeScreen(
 ) {
     val photos = vm.photos
     val full = StaggeredGridItemSpan.FullLine
+    val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+
+    // Pinch to zoom the grid like iOS Photos: 2 = large cards, 3..6 = dense square grid.
+    var columns by rememberSaveable { mutableIntStateOf(2) }
+    var pinch by remember { mutableFloatStateOf(1f) }
+    var pivot by remember { mutableStateOf(Offset.Zero) }
+    val dense = columns > 2
+    val gap by animateDpAsState(if (dense) 3.dp else 16.dp, gridSpring(), label = "gap")
+    val side by animateDpAsState(if (dense) 4.dp else 20.dp, gridSpring(), label = "side")
+    val corner = when (columns) { 2 -> 22.dp; 3 -> 10.dp; 4 -> 7.dp; else -> 5.dp }
 
     LazyVerticalStaggeredGrid(
-        columns = StaggeredGridCells.Fixed(2),
-        modifier = Modifier.fillMaxSize().background(Palette.Paper),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 130.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalItemSpacing = 16.dp,
+        columns = StaggeredGridCells.Fixed(columns),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Palette.Paper)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var acc = 1f
+                    var pinching = false
+                    do {
+                        // Initial pass: we see two-finger gestures before the grid scrolls.
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        val pts = ev.changes.filter { it.pressed && it.previousPressed }
+                        if (pts.size >= 2) {
+                            pinching = true
+                            val zoom = ev.calculateZoom()
+                            if (zoom.isFinite() && zoom > 0f) acc *= zoom
+                            val c = ev.calculateCentroid(useCurrent = true)
+                            if (c.isSpecified) pivot = c
+                            when {
+                                acc > 1.28f && columns > 2 -> { columns--; acc = 1f; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                                acc < 0.78f && columns < 6 -> { columns++; acc = 1f; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                            }
+                            // Live rubber-band feedback while pinching.
+                            pinch = (1f + (acc - 1f) * 0.55f).coerceIn(0.88f, 1.14f)
+                            ev.changes.forEach { it.consume() }
+                        } else if (pinching) {
+                            ev.changes.forEach { it.consume() }
+                        }
+                    } while (ev.changes.any { it.pressed })
+                    if (pinching) {
+                        val start = pinch
+                        scope.launch { animate(start, 1f, animationSpec = gridSpring()) { v, _ -> pinch = v } }
+                    }
+                }
+            }
+            .graphicsLayer {
+                scaleX = pinch; scaleY = pinch
+                if (size.width > 0f && size.height > 0f) {
+                    transformOrigin = TransformOrigin(
+                        (pivot.x / size.width).coerceIn(0f, 1f),
+                        (pivot.y / size.height).coerceIn(0f, 1f),
+                    )
+                }
+            },
+        contentPadding = PaddingValues(start = side, end = side, bottom = 130.dp),
+        horizontalArrangement = Arrangement.spacedBy(gap),
+        verticalItemSpacing = gap,
     ) {
         item(span = full) {
             Row(
-                Modifier.fillMaxWidth().statusBarsPadding().padding(top = 28.dp, bottom = 4.dp),
+                Modifier.fillMaxWidth().statusBarsPadding().padding(start = 20.dp - side, end = 20.dp - side, top = 28.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Discover", style = MaterialTheme.typography.displaySmall, modifier = Modifier.weight(1f))
@@ -76,7 +156,7 @@ fun HomeScreen(
         if (vm.albums.isNotEmpty()) {
             item(span = full) {
                 LazyRow(
-                    contentPadding = PaddingValues(vertical = 12.dp),
+                    contentPadding = PaddingValues(start = 20.dp - side, end = 20.dp - side, top = 12.dp, bottom = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(horizontal = 0.dp),
                 ) {
@@ -91,6 +171,7 @@ fun HomeScreen(
             item(span = full) {
                 Row(
                     Modifier
+                        .padding(horizontal = 20.dp - side)
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(18.dp))
                         .background(Palette.OrangeSoft)
@@ -111,7 +192,7 @@ fun HomeScreen(
 
         item(span = full) {
             Row(
-                Modifier.fillMaxWidth().padding(top = 8.dp),
+                Modifier.fillMaxWidth().padding(start = 20.dp - side, end = 20.dp - side, top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Recent", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -136,8 +217,17 @@ fun HomeScreen(
             else -> itemsIndexed(photos, key = { _, p -> p.id }) { index, photo ->
                 PhotoTile(
                     photo = photo,
-                    aspect = if (index == 0) 0.74f else photo.aspect.coerceIn(0.72f, 1.35f),
-                    elevated = index == 0,
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = null, fadeOutSpec = null,
+                        placementSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
+                    ),
+                    aspect = when {
+                        dense -> 1f
+                        index == 0 -> 0.74f
+                        else -> photo.aspect.coerceIn(0.72f, 1.35f)
+                    },
+                    corner = corner,
+                    elevated = index == 0 && !dense,
                     favorite = vm.isFavorite(photo.id),
                     selectionMode = vm.selecting,
                     selected = photo.id in vm.selection,
@@ -148,3 +238,5 @@ fun HomeScreen(
         }
     }
 }
+
+private fun <T> gridSpring() = spring<T>(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)

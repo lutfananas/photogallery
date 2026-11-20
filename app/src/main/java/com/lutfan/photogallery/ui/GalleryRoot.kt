@@ -1,6 +1,9 @@
 package com.lutfan.photogallery.ui
 
 import android.app.Activity
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.lutfan.photogallery.ui.components.LocalGlassBackdrop
 import android.content.ClipData
 import android.content.Intent
 import androidx.activity.compose.BackHandler
@@ -148,8 +151,10 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
     val darkScreen = route?.startsWith("viewer") == true || route?.startsWith("editor") == true
     StatusBarIcons(darkIcons = !darkScreen)
 
+    val glassBackdrop = rememberLayerBackdrop()
     Box(Modifier.fillMaxSize()) {
-        SharedTransitionLayout {
+        // Everything drawn here is what the floating glass bars refract/blur.
+        SharedTransitionLayout(Modifier.fillMaxSize().layerBackdrop(glassBackdrop)) {
         CompositionLocalProvider(LocalSharedScope provides this) {
         NavHost(
             navController = nav,
@@ -246,6 +251,7 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
         }
         }
 
+        CompositionLocalProvider(LocalGlassBackdrop provides glassBackdrop) {
         // Leaving a screen ends selection; system back cancels it first.
         LaunchedEffect(route) { vm.clearSelection() }
         BackHandler(enabled = vm.selecting) { vm.clearSelection() }
@@ -307,6 +313,7 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
                     }
                 },
             )
+        }
         }
     }
 }
