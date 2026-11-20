@@ -154,7 +154,13 @@ private fun PhotoStagger(
         if (header != null) item(span = StaggeredGridItemSpan.FullLine) { header() }
         if (photos.isEmpty()) item(span = StaggeredGridItemSpan.FullLine) { empty() }
         items(photos, key = { it.id }) { p ->
-            PhotoTile(p, favorite = vm.isFavorite(p.id)) { onPhoto(p.id) }
+            PhotoTile(
+                p,
+                favorite = vm.isFavorite(p.id),
+                selectionMode = vm.selecting,
+                selected = p.id in vm.selection,
+                onLongClick = { vm.toggleSelect(p.id) },
+            ) { if (vm.selecting) vm.toggleSelect(p.id) else onPhoto(p.id) }
         }
     }
 }

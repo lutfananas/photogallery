@@ -1,6 +1,10 @@
 package com.lutfan.photogallery.ui
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.Intent
+import androidx.activity.compose.BackHandler
+import com.lutfan.photogallery.ui.components.SelectionBar
 import android.content.ActivityNotFoundException
 import android.net.Uri
 import android.widget.Toast
@@ -242,8 +246,43 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
         }
         }
 
+        // Leaving a screen ends selection; system back cancels it first.
+        LaunchedEffect(route) { vm.clearSelection() }
+        BackHandler(enabled = vm.selecting) { vm.clearSelection() }
+
         AnimatedVisibility(
-            visible = selectedTab != null,
+            visible = vm.selecting,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            val selected = vm.selectedPhotos()
+            val allFav = selected.isNotEmpty() && selected.all { vm.isFavorite(it.id) }
+            SelectionBar(
+                count = vm.selection.size,
+                allFavorite = allFav,
+                onClose = vm::clearSelection,
+                onShare = {
+                    sharePhotos(context, selected.map { it.uri })
+                    vm.clearSelection()
+                },
+                onFavorite = {
+                    vm.setFavorite(selected.map { it.id }, favorite = !allFav)
+                    Toast.makeText(
+                        context,
+                        if (allFav) "Removed ${selected.size} from favorites" else "Added ${selected.size} to favorites",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    vm.clearSelection()
+                },
+            )
+        }
+
+        AnimatedVisibility(
+            visible = selectedTab != null && !vm.selecting,
             enter = slideInVertically { it } + fadeIn(),
             exit = slideOutVertically { it } + fadeOut(),
             modifier = Modifier
@@ -270,6 +309,21 @@ private fun MainNav(vm: GalleryViewModel, access: MediaAccess, requestAccess: ()
             )
         }
     }
+}
+
+private fun sharePhotos(context: android.content.Context, uris: List<Uri>) {
+    if (uris.isEmpty()) return
+    val send = if (uris.size == 1) {
+        Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris.first())
+    } else {
+        Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+    }.apply {
+        type = "image/*"
+        // ClipData makes the read grant cover every shared URI.
+        clipData = ClipData.newRawUri(null, uris.first()).also { c -> uris.drop(1).forEach { c.addItem(ClipData.Item(it)) } }
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, null))
 }
 
 private fun NavBackStackEntry.isViewer() = destination.route?.startsWith("viewer") == true

@@ -36,6 +36,27 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(true)
         private set
 
+    /** Multi-select (long-press a photo). Empty = not selecting. */
+    var selection by mutableStateOf<Set<Long>>(emptySet())
+        private set
+    val selecting get() = selection.isNotEmpty()
+
+    fun toggleSelect(id: Long) {
+        selection = if (id in selection) selection - id else selection + id
+    }
+
+    fun clearSelection() {
+        if (selection.isNotEmpty()) selection = emptySet()
+    }
+
+    /** Selected photos that still exist, in gallery order. */
+    fun selectedPhotos(): List<Photo> = photos.filter { it.id in selection }
+
+    fun setFavorite(ids: Collection<Long>, favorite: Boolean) {
+        favorites = if (favorite) favorites + ids else favorites - ids.toSet()
+        prefs.edit { putStringSet(KEY_FAV, favorites.map { it.toString() }.toSet()) }
+    }
+
     private var refreshJob: Job? = null
 
     private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -59,6 +80,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun reloadNow() {
         val list = runCatching { repo.loadPhotos() }.getOrDefault(emptyList())
         photos = list
+        if (selection.isNotEmpty()) {
+            val alive = list.mapTo(HashSet()) { it.id }
+            selection = selection.filterTo(HashSet()) { it in alive }
+        }
         albums = list.groupBy { it.bucketId }
             .map { (id, items) -> Album(id, items.first().bucketName, items.first().uri, items.size) }
             .sortedByDescending { it.count }

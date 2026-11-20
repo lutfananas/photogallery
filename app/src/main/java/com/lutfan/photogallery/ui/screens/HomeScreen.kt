@@ -139,7 +139,10 @@ fun HomeScreen(
                     aspect = if (index == 0) 0.74f else photo.aspect.coerceIn(0.72f, 1.35f),
                     elevated = index == 0,
                     favorite = vm.isFavorite(photo.id),
-                    onClick = { onPhoto(photo.id) },
+                    selectionMode = vm.selecting,
+                    selected = photo.id in vm.selection,
+                    onLongClick = { vm.toggleSelect(photo.id) },
+                    onClick = { if (vm.selecting) vm.toggleSelect(photo.id) else onPhoto(photo.id) },
                 )
             }
         }
