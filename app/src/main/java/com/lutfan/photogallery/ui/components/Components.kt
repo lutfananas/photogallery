@@ -137,6 +137,7 @@ fun PhotoTile(
     selectionMode: Boolean = false,
     selected: Boolean = false,
     onLongClick: (() -> Unit)? = null,
+    sharedEnabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(corner)
@@ -177,7 +178,7 @@ fun PhotoTile(
             model = request,
             contentDescription = photo.name,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().sharedPhoto(photo.id),
+            modifier = Modifier.fillMaxSize().sharedPhoto(photo.id, enabled = sharedEnabled),
         )
         if (selectionMode) {
             Box(
