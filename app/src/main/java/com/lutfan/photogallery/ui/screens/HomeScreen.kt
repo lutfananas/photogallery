@@ -61,6 +61,15 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import androidx.compose.animation.BoundsTransform
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.animateBounds
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+import androidx.compose.runtime.LaunchedEffect
+import com.lutfan.photogallery.ui.LocalSharedScope
 import com.lutfan.photogallery.GalleryViewModel
 import com.lutfan.photogallery.ui.components.CircleThumb
 import com.lutfan.photogallery.ui.components.EmptyState
@@ -86,12 +95,46 @@ fun HomeScreen(
     var columns by rememberSaveable { mutableIntStateOf(2) }
     var pinch by remember { mutableFloatStateOf(1f) }
     var pivot by remember { mutableStateOf(Offset.Zero) }
+    val gridState = rememberLazyStaggeredGridState()
+    // Tiles animate their bounds (size + position) only around a pinch, so normal
+    // scrolling is never slowed down by layout animations.
+    var morphing by remember { mutableStateOf(false) }
+    var morphOff by remember { mutableStateOf<Job?>(null) }
+    // Photo kept under the fingers across a column change: key + where in the tile (0..1).
+    var anchor by remember { mutableStateOf<Pair<Any, Float>?>(null) }
+
+    fun changeColumns(newColumns: Int) {
+        val hit = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+            info.key is Long &&
+                pivot.x >= info.offset.x && pivot.x < info.offset.x + info.size.width &&
+                pivot.y >= info.offset.y && pivot.y < info.offset.y + info.size.height
+        }
+        anchor = hit?.let { it.key to ((pivot.y - it.offset.y) / it.size.height).coerceIn(0f, 1f) }
+        columns = newColumns
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+    }
+
+    // After the grid re-lays out with the new column count, scroll so the anchored
+    // photo sits under the fingers again.
+    LaunchedEffect(columns) {
+        val (key, frac) = anchor ?: return@LaunchedEffect
+        anchor = null
+        val index = gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.index
+            ?: (vm.photos.indexOfFirst { it.id == key }.takeIf { it >= 0 }?.let { it + headerCount(vm, partialAccess) })
+            ?: return@LaunchedEffect
+        gridState.scrollToItem(index)
+        val info = gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key } ?: return@LaunchedEffect
+        val desiredTop = pivot.y - frac * info.size.height
+        gridState.scrollBy(info.offset.y - desiredTop)
+    }
     val dense = columns > 2
     val gap by animateDpAsState(if (dense) 3.dp else 16.dp, gridSpring(), label = "gap")
     val side by animateDpAsState(if (dense) 4.dp else 20.dp, gridSpring(), label = "side")
     val corner = when (columns) { 2 -> 22.dp; 3 -> 10.dp; 4 -> 7.dp; else -> 5.dp }
 
+    val lookahead = LocalSharedScope.current
     LazyVerticalStaggeredGrid(
+        state = gridState,
         columns = StaggeredGridCells.Fixed(columns),
         modifier = Modifier
             .fillMaxSize()
@@ -106,23 +149,28 @@ fun HomeScreen(
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
                         val pts = ev.changes.filter { it.pressed && it.previousPressed }
                         if (pts.size >= 2) {
-                            pinching = true
+                            if (!pinching) {
+                                pinching = true
+                                morphOff?.cancel()
+                                morphing = true
+                            }
                             val zoom = ev.calculateZoom()
                             if (zoom.isFinite() && zoom > 0f) acc *= zoom
                             val c = ev.calculateCentroid(useCurrent = true)
                             if (c.isSpecified) pivot = c
                             when {
-                                acc > 1.28f && columns > 2 -> { columns--; acc = 1f; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                                acc < 0.78f && columns < 6 -> { columns++; acc = 1f; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                                acc > 1.28f && columns > 2 -> { changeColumns(columns - 1); acc = 1f }
+                                acc < 0.78f && columns < 6 -> { changeColumns(columns + 1); acc = 1f }
                             }
                             // Live rubber-band feedback while pinching.
-                            pinch = (1f + (acc - 1f) * 0.55f).coerceIn(0.88f, 1.14f)
+                            pinch = (1f + (acc - 1f) * 0.35f).coerceIn(0.93f, 1.08f)
                             ev.changes.forEach { it.consume() }
                         } else if (pinching) {
                             ev.changes.forEach { it.consume() }
                         }
                     } while (ev.changes.any { it.pressed })
                     if (pinching) {
+                        morphOff = scope.launch { delay(900); morphing = false }
                         val start = pinch
                         scope.launch { animate(start, 1f, animationSpec = gridSpring()) { v, _ -> pinch = v } }
                     }
@@ -217,10 +265,10 @@ fun HomeScreen(
             else -> itemsIndexed(photos, key = { _, p -> p.id }) { index, photo ->
                 PhotoTile(
                     photo = photo,
-                    modifier = Modifier.animateItem(
-                        fadeInSpec = null, fadeOutSpec = null,
-                        placementSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
-                    ),
+                    modifier = if (morphing && lookahead != null) {
+                        @OptIn(ExperimentalSharedTransitionApi::class)
+                        Modifier.animateBounds(lookahead, boundsTransform = GridBoundsTransform)
+                    } else Modifier,
                     aspect = when {
                         dense -> 1f
                         index == 0 -> 0.74f
@@ -240,3 +288,12 @@ fun HomeScreen(
 }
 
 private fun <T> gridSpring() = spring<T>(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+private val GridBoundsTransform = BoundsTransform { _, _ ->
+    spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+}
+
+/** Full-line items placed before the photos (title, albums, banner, "Recent"). */
+private fun headerCount(vm: GalleryViewModel, partial: Boolean): Int =
+    1 + (if (vm.albums.isNotEmpty()) 1 else 0) + (if (partial) 1 else 0) + 1
